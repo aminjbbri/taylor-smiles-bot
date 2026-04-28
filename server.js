@@ -18,10 +18,10 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const BASE_URL = process.env.BASE_URL || "https://taylor-smiles-bot.onrender.com";
 
 const REALTIME_MODEL = process.env.REALTIME_MODEL || "gpt-4o-realtime-preview";
-const REALTIME_VOICE = process.env.REALTIME_VOICE || "alloy";
 
-// For first greeting TTS
-const GREETING_VOICE = process.env.GREETING_VOICE || "nova";
+// Best natural voice to test first
+const REALTIME_VOICE = process.env.REALTIME_VOICE || "marin";
+const GREETING_VOICE = process.env.GREETING_VOICE || "marin";
 
 const client = new OpenAI({
   apiKey: OPENAI_API_KEY,
@@ -35,15 +35,13 @@ if (!fs.existsSync(AUDIO_DIR)) {
 
 app.use("/audio", express.static(AUDIO_DIR));
 
-// IMPORTANT:
-// This file name includes "v2" so Render creates a new greeting
-// and does not reuse your older cached greeting.
-const GREETING_FILE = path.join(AUDIO_DIR, "greeting-v2.mp3");
+// New file name so old cached greeting is not reused
+const GREETING_FILE = path.join(AUDIO_DIR, "greeting-marin-v1.mp3");
 
 async function makeGreetingIfNeeded() {
   if (fs.existsSync(GREETING_FILE)) return;
 
-  console.log("Creating natural greeting audio...");
+  console.log("Creating natural greeting audio with voice:", GREETING_VOICE);
 
   const speech = await client.audio.speech.create({
     model: "gpt-4o-mini-tts",

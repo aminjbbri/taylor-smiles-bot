@@ -14,19 +14,27 @@ const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const BASE_URL = process.env.BASE_URL || "https://taylor-smiles-bot.onrender.com";
 
+// Safe model for Realtime preview
+const REALTIME_MODEL = process.env.REALTIME_MODEL || "gpt-4o-realtime-preview";
+
+// Safer voice for testing. Later we can test other supported voices.
+const REALTIME_VOICE = process.env.REALTIME_VOICE || "alloy";
+
 if (!OPENAI_API_KEY) {
-  console.error("Missing OPENAI_API_KEY");
+  console.error("Missing OPENAI_API_KEY environment variable.");
 }
 
 app.get("/", (req, res) => {
-  res.send("Taylor Smiles realtime receptionist is running");
+  res.send("Taylor Smiles realtime receptionist is running.");
 });
 
 app.all("/incoming-call", (req, res) => {
+  const host = new URL(BASE_URL).host;
+
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="wss://${new URL(BASE_URL).host}/media-stream" />
+    <Stream url="wss://${host}/media-stream" />
   </Connect>
 </Response>`;
 
@@ -40,34 +48,45 @@ const wss = new WebSocket.Server({
 });
 
 wss.on("connection", (twilioWs) => {
-  console.log("Twilio connected to media stream");
+  console.log("Twilio connected.");
 
   let streamSid = null;
   let openAiWs = null;
+  let openAiReady = false;
 
-  const connectToOpenAI = () => {
-    openAiWs = new WebSocket(
-      "wss://api.openai.com/v1/realtime?model=gpt-realtime",
-      {
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "OpenAI-Beta": "realtime=v1",
-        },
-      }
-    );
+  function safeSendToTwilio(payload) {
+    if (twilioWs.readyState === WebSocket.OPEN) {
+      twilioWs.send(JSON.stringify(payload));
+    }
+  }
+
+  function safeSendToOpenAI(payload) {
+    if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
+      openAiWs.send(JSON.stringify(payload));
+    }
+  }
+
+  function connectOpenAI() {
+    const openAiUrl = `wss://api.openai.com/v1/realtime?model=${REALTIME_MODEL}`;
+
+    openAiWs = new WebSocket(openAiUrl, {
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "realtime=v1",
+      },
+    });
 
     openAiWs.on("open", () => {
-      console.log("Connected to OpenAI Realtime");
+      console.log("Connected to OpenAI Realtime.");
+      openAiReady = true;
 
       const sessionUpdate = {
         type: "session.update",
         session: {
-          type: "realtime",
-          model: "gpt-realtime",
           instructions: `
 You are a warm woman answering the phone for Taylor Smiles.
 
-The experience matters more than business scripting.
+The experience matters more than sounding like a business script.
 
 You are a person first, receptionist second.
 
@@ -101,80 +120,78 @@ Taylor Smiles is an orthodontic clinic.
 People may ask about braces, Invisalign, retainers, appointments, adults, kids, consultations, broken retainers, broken brackets, pain, or rescheduling.
 
 Your goal is to make the phone call feel natural, easy, and human.
-          `,
-          voice: "marin",
+          `.trim(),
+
+          voice: REALTIME_VOICE,
+
+          // Twilio phone audio format
           input_audio_format: "g711_ulaw",
           output_audio_format: "g711_ulaw",
+
           turn_detection: {
             type: "server_vad",
-            threshold: 0.5,
+            threshold: 0.45,
             prefix_padding_ms: 300,
-            silence_duration_ms: 500
+            silence_duration_ms: 550
           }
-        },
+        }
       };
 
-      openAiWs.send(JSON.stringify(sessionUpdate));
+      safeSendToOpenAI(sessionUpdate);
 
-      const initialResponse = {
+      // Initial greeting
+      safeSendToOpenAI({
         type: "response.create",
         response: {
           modalities: ["audio"],
           instructions:
-            "Greet the caller naturally in one short sentence. Do not sound scripted.",
-        },
-      };
-
-      openAiWs.send(JSON.stringify(initialResponse));
+            "Greet the caller naturally in one very short sentence. Sound relaxed, not scripted."
+        }
+      });
     });
 
     openAiWs.on("message", (data) => {
       try {
         const event = JSON.parse(data.toString());
 
+        // OpenAI sends audio chunks back
         if (event.type === "response.audio.delta" && event.delta && streamSid) {
-          const audioDelta = {
+          safeSendToTwilio({
             event: "media",
             streamSid,
             media: {
-              payload: event.delta,
-            },
-          };
-
-          if (twilioWs.readyState === WebSocket.OPEN) {
-            twilioWs.send(JSON.stringify(audioDelta));
-          }
+              payload: event.delta
+            }
+          });
         }
 
-        if (event.type === "input_audio_buffer.speech_started") {
-          if (streamSid && twilioWs.readyState === WebSocket.OPEN) {
-            twilioWs.send(
-              JSON.stringify({
-                event: "clear",
-                streamSid,
-              })
-            );
-          }
+        // If caller starts talking while assistant speaks, clear Twilio audio
+        if (event.type === "input_audio_buffer.speech_started" && streamSid) {
+          safeSendToTwilio({
+            event: "clear",
+            streamSid
+          });
         }
 
         if (event.type === "error") {
-          console.error("OpenAI error:", event);
+          console.error("OpenAI Realtime error:", JSON.stringify(event, null, 2));
         }
       } catch (err) {
-        console.error("OpenAI message parse error:", err);
+        console.error("Error parsing OpenAI message:", err);
       }
-    });
-
-    openAiWs.on("close", () => {
-      console.log("OpenAI Realtime disconnected");
     });
 
     openAiWs.on("error", (err) => {
       console.error("OpenAI WebSocket error:", err);
     });
-  };
 
-  connectToOpenAI();
+    openAiWs.on("close", (code, reason) => {
+      openAiReady = false;
+      console.log("OpenAI WebSocket closed:", code, reason?.toString());
+    });
+  }
+
+  connectOpenAI();
 
   twilioWs.on("message", (message) => {
     try {
@@ -186,30 +203,27 @@ Your goal is to make the phone call feel natural, easy, and human.
       }
 
       if (msg.event === "media") {
-        if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
-          openAiWs.send(
-            JSON.stringify({
-              type: "input_audio_buffer.append",
-              audio: msg.media.payload,
-            })
-          );
+        if (openAiReady) {
+          safeSendToOpenAI({
+            type: "input_audio_buffer.append",
+            audio: msg.media.payload
+          });
         }
       }
 
       if (msg.event === "stop") {
-        console.log("Twilio stream stopped");
+        console.log("Twilio stream stopped.");
         if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
           openAiWs.close();
         }
       }
     } catch (err) {
-      console.error("Twilio message parse error:", err);
+      console.error("Error parsing Twilio message:", err);
     }
   });
 
   twilioWs.on("close", () => {
-    console.log("Twilio disconnected");
-
+    console.log("Twilio disconnected.");
     if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
       openAiWs.close();
     }

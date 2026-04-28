@@ -19,9 +19,9 @@ const BASE_URL = process.env.BASE_URL || "https://taylor-smiles-bot.onrender.com
 
 const REALTIME_MODEL = process.env.REALTIME_MODEL || "gpt-4o-realtime-preview";
 
-// Cedar voice
-const REALTIME_VOICE = process.env.REALTIME_VOICE || "cedar";
-const GREETING_VOICE = process.env.GREETING_VOICE || "cedar";
+// Single best voice choice
+const REALTIME_VOICE = process.env.REALTIME_VOICE || "marin";
+const GREETING_VOICE = process.env.GREETING_VOICE || "marin";
 
 const client = new OpenAI({
   apiKey: OPENAI_API_KEY,
@@ -35,13 +35,13 @@ if (!fs.existsSync(AUDIO_DIR)) {
 
 app.use("/audio", express.static(AUDIO_DIR));
 
-// New file name so it does NOT reuse old marin/nova/alloy greeting
-const GREETING_FILE = path.join(AUDIO_DIR, "greeting-cedar-v1.mp3");
+// New file name so old cedar/alloy/nova greeting is not reused
+const GREETING_FILE = path.join(AUDIO_DIR, "greeting-marin-final-v1.mp3");
 
 async function makeGreetingIfNeeded() {
   if (fs.existsSync(GREETING_FILE)) return;
 
-  console.log("Creating Cedar greeting audio...");
+  console.log("Creating Marin greeting audio...");
 
   const speech = await client.audio.speech.create({
     model: "gpt-4o-mini-tts",
@@ -52,7 +52,7 @@ async function makeGreetingIfNeeded() {
   const buffer = Buffer.from(await speech.arrayBuffer());
   fs.writeFileSync(GREETING_FILE, buffer);
 
-  console.log("Cedar greeting audio created.");
+  console.log("Marin greeting audio created.");
 }
 
 if (!OPENAI_API_KEY) {

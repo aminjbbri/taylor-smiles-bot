@@ -1,288 +1,225 @@
+require("dotenv").config();
+
 const express = require("express");
-const twilio = require("twilio");
-const OpenAI = require("openai");
-const fs = require("fs");
-const path = require("path");
+const http = require("http");
+const WebSocket = require("ws");
 
 const app = express();
+const server = http.createServer(app);
 
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-// Change this if your Render URL changes
+const PORT = process.env.PORT || 3000;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const BASE_URL = process.env.BASE_URL || "https://taylor-smiles-bot.onrender.com";
 
-// OpenAI TTS female-style voice
-const TTS_VOICE = "nova";
-
-// Audio storage
-const AUDIO_DIR = path.join(__dirname, "audio");
-
-if (!fs.existsSync(AUDIO_DIR)) {
-  fs.mkdirSync(AUDIO_DIR);
-}
-
-app.use("/audio", express.static(AUDIO_DIR));
-
-// Simple call memory
-const calls = new Map();
-
-function getCall(callSid) {
-  if (!calls.has(callSid)) {
-    calls.set(callSid, {
-      history: [],
-      startedAt: Date.now(),
-    });
-  }
-
-  return calls.get(callSid);
-}
-
-function clearCall(callSid) {
-  calls.delete(callSid);
-}
-
-function wantsToEnd(text = "") {
-  const t = text.toLowerCase().trim();
-
-  return [
-    "bye",
-    "goodbye",
-    "no",
-    "no thanks",
-    "no thank you",
-    "that's all",
-    "that is all",
-    "nothing else",
-    "i'm good",
-    "im good",
-    "that's it",
-    "thats it",
-    "all good",
-  ].includes(t);
-}
-
-async function makeSpeechAudio(text) {
-  const cleanText = String(text || "").trim();
-
-  const tts = await client.audio.speech.create({
-    model: "gpt-4o-mini-tts",
-    voice: TTS_VOICE,
-    input: cleanText,
-  });
-
-  const fileName = `speech-${Date.now()}-${Math.floor(Math.random() * 100000)}.mp3`;
-  const filePath = path.join(AUDIO_DIR, fileName);
-
-  const buffer = Buffer.from(await tts.arrayBuffer());
-  fs.writeFileSync(filePath, buffer);
-
-  // delete old audio after 10 minutes
-  setTimeout(() => {
-    fs.unlink(filePath, () => {});
-  }, 10 * 60 * 1000);
-
-  return `${BASE_URL}/audio/${fileName}`;
-}
-
-async function playOrSay(twiml, text) {
-  try {
-    const audioUrl = await makeSpeechAudio(text);
-    twiml.play(audioUrl);
-  } catch (err) {
-    console.error("TTS ERROR:", err);
-    // fallback if TTS fails
-    twiml.say(text);
-  }
-}
-
-async function getNaturalReply(userSpeech, call) {
-  const history = call.history.slice(-10);
-
-  const systemPrompt = `
-You are the phone receptionist voice for Taylor Smiles.
-
-The experience matters more than sounding like a business script.
-
-Speak like a normal warm woman on the phone.
-
-You are not a form.
-You are not a customer service script.
-You are not a chatbot.
-You are just having a natural phone conversation.
-
-Style:
-- very conversational
-- calm
-- casual
-- warm
-- short
-- easy to talk to
-- not overly professional
-- not overly helpful
-- not robotic
-
-Very important:
-- keep replies short, usually 5 to 15 words
-- do not always ask a follow-up question
-- do not say "anything else I can help with"
-- do not repeat phrases
-- do not force the caller through a process
-- do not ask multiple questions at once
-- do not over-explain
-- let the conversation breathe
-
-Natural phrases are okay:
-- yeah
-- sure
-- of course
-- no problem
-- okay
-- absolutely
-- I get you
-
-Business context:
-Taylor Smiles is an orthodontic clinic.
-They may ask about braces, Invisalign, retainers, appointments, adults, children, consultations, or rescheduling.
-
-Business rules:
-- do not give exact treatment prices
-- if they ask price, say it depends on the case and the team can go over it during a consultation
-- if they want to book or need help, naturally ask for name or number only when it feels normal
-- if they seem done, close warmly
-
-If asked whether you are AI, do not lie. Say you're the phone assistant for Taylor Smiles.
-
-The goal is not to sound smart.
-The goal is to sound easy and human.
-`;
-
-  const completion = await client.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: systemPrompt },
-      ...history,
-      { role: "user", content: userSpeech },
-    ],
-  });
-
-  return completion.choices?.[0]?.message?.content?.trim() || "Sorry, I missed that.";
+if (!OPENAI_API_KEY) {
+  console.error("Missing OPENAI_API_KEY");
 }
 
 app.get("/", (req, res) => {
-  res.send("Taylor Smiles natural receptionist bot is running");
+  res.send("Taylor Smiles realtime receptionist is running");
 });
 
-// First greeting only
-app.all("/voice", async (req, res) => {
-  const callSid = req.body.CallSid || "test-call";
-  getCall(callSid);
-
-  const twiml = new twilio.twiml.VoiceResponse();
-
-  const gather = twiml.gather({
-    input: "speech",
-    action: "/conversation",
-    method: "POST",
-    speechTimeout: "auto",
-    timeout: 6,
-  });
-
-  await playOrSay(
-    gather,
-    "Hi, thanks for calling Taylor Smiles. How can I help?"
-  );
-
-  await playOrSay(twiml, "No worries. You can call us back anytime. Take care.");
-  twiml.hangup();
+app.all("/incoming-call", (req, res) => {
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="wss://${new URL(BASE_URL).host}/media-stream" />
+  </Connect>
+</Response>`;
 
   res.type("text/xml");
-  res.send(twiml.toString());
+  res.send(twiml);
 });
 
-// Main natural conversation loop
-app.all("/conversation", async (req, res) => {
-  const callSid = req.body.CallSid || "test-call";
-  const userSpeech = (req.body.SpeechResult || "").trim();
+const wss = new WebSocket.Server({
+  server,
+  path: "/media-stream",
+});
 
-  const call = getCall(callSid);
-  const twiml = new twilio.twiml.VoiceResponse();
+wss.on("connection", (twilioWs) => {
+  console.log("Twilio connected to media stream");
 
-  try {
-    if (!userSpeech) {
-      const gather = twiml.gather({
-        input: "speech",
-        action: "/conversation",
-        method: "POST",
-        speechTimeout: "auto",
-        timeout: 5,
-      });
+  let streamSid = null;
+  let openAiWs = null;
 
-      await playOrSay(gather, "Sorry, I missed that. Say that again?");
+  const connectToOpenAI = () => {
+    openAiWs = new WebSocket(
+      "wss://api.openai.com/v1/realtime?model=gpt-realtime",
+      {
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "realtime=v1",
+        },
+      }
+    );
 
-      await playOrSay(twiml, "No worries. Take care.");
-      twiml.hangup();
+    openAiWs.on("open", () => {
+      console.log("Connected to OpenAI Realtime");
 
-      res.type("text/xml");
-      res.send(twiml.toString());
-      return;
-    }
+      const sessionUpdate = {
+        type: "session.update",
+        session: {
+          type: "realtime",
+          model: "gpt-realtime",
+          instructions: `
+You are a warm woman answering the phone for Taylor Smiles.
 
-    if (wantsToEnd(userSpeech)) {
-      await playOrSay(twiml, "Okay, sounds good. Have a great day.");
-      twiml.hangup();
-      clearCall(callSid);
+The experience matters more than business scripting.
 
-      res.type("text/xml");
-      res.send(twiml.toString());
-      return;
-    }
+You are a person first, receptionist second.
 
-    call.history.push({ role: "user", content: userSpeech });
+Speak naturally, casually, and briefly.
+You are not a form.
+You are not a chatbot.
+You are not a customer-service script.
 
-    const reply = await getNaturalReply(userSpeech, call);
+Tone:
+- warm
+- relaxed
+- human
+- calm
+- easy to talk to
+- lightly conversational
+- not overly polished
 
-    call.history.push({ role: "assistant", content: reply });
+Rules:
+- keep responses short
+- do not over-explain
+- do not ask too many questions
+- do not repeat the same phrase
+- do not say "anything else I can help with" repeatedly
+- do not force a structure
+- do not give exact treatment pricing
+- if asked about price, say it depends on the case and the team can go over that during a consultation
+- if the caller asks if you are AI, answer honestly: "I'm the phone assistant for Taylor Smiles."
 
-    await playOrSay(twiml, reply);
+Business context:
+Taylor Smiles is an orthodontic clinic.
+People may ask about braces, Invisalign, retainers, appointments, adults, kids, consultations, broken retainers, broken brackets, pain, or rescheduling.
 
-    // After replying, just listen quietly.
-    // No forced "anything else" line.
-    const gather = twiml.gather({
-      input: "speech",
-      action: "/conversation",
-      method: "POST",
-      speechTimeout: "auto",
-      timeout: 6,
+Your goal is to make the phone call feel natural, easy, and human.
+          `,
+          voice: "marin",
+          input_audio_format: "g711_ulaw",
+          output_audio_format: "g711_ulaw",
+          turn_detection: {
+            type: "server_vad",
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 500
+          }
+        },
+      };
+
+      openAiWs.send(JSON.stringify(sessionUpdate));
+
+      const initialResponse = {
+        type: "response.create",
+        response: {
+          modalities: ["audio"],
+          instructions:
+            "Greet the caller naturally in one short sentence. Do not sound scripted.",
+        },
+      };
+
+      openAiWs.send(JSON.stringify(initialResponse));
     });
 
-    // Empty gather means the line stays open naturally after the reply.
-    // If caller speaks, conversation continues.
-    // If not, Twilio continues to polite close below.
+    openAiWs.on("message", (data) => {
+      try {
+        const event = JSON.parse(data.toString());
 
-    await playOrSay(twiml, "Okay, take care.");
-    twiml.hangup();
+        if (event.type === "response.audio.delta" && event.delta && streamSid) {
+          const audioDelta = {
+            event: "media",
+            streamSid,
+            media: {
+              payload: event.delta,
+            },
+          };
 
-    res.type("text/xml");
-    res.send(twiml.toString());
-  } catch (err) {
-    console.error("CONVERSATION ERROR:", err);
+          if (twilioWs.readyState === WebSocket.OPEN) {
+            twilioWs.send(JSON.stringify(audioDelta));
+          }
+        }
 
-    await playOrSay(twiml, "Sorry, something went wrong on my end. Please try again later.");
-    twiml.hangup();
-    clearCall(callSid);
+        if (event.type === "input_audio_buffer.speech_started") {
+          if (streamSid && twilioWs.readyState === WebSocket.OPEN) {
+            twilioWs.send(
+              JSON.stringify({
+                event: "clear",
+                streamSid,
+              })
+            );
+          }
+        }
 
-    res.type("text/xml");
-    res.send(twiml.toString());
-  }
+        if (event.type === "error") {
+          console.error("OpenAI error:", event);
+        }
+      } catch (err) {
+        console.error("OpenAI message parse error:", err);
+      }
+    });
+
+    openAiWs.on("close", () => {
+      console.log("OpenAI Realtime disconnected");
+    });
+
+    openAiWs.on("error", (err) => {
+      console.error("OpenAI WebSocket error:", err);
+    });
+  };
+
+  connectToOpenAI();
+
+  twilioWs.on("message", (message) => {
+    try {
+      const msg = JSON.parse(message.toString());
+
+      if (msg.event === "start") {
+        streamSid = msg.start.streamSid;
+        console.log("Twilio stream started:", streamSid);
+      }
+
+      if (msg.event === "media") {
+        if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
+          openAiWs.send(
+            JSON.stringify({
+              type: "input_audio_buffer.append",
+              audio: msg.media.payload,
+            })
+          );
+        }
+      }
+
+      if (msg.event === "stop") {
+        console.log("Twilio stream stopped");
+        if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
+          openAiWs.close();
+        }
+      }
+    } catch (err) {
+      console.error("Twilio message parse error:", err);
+    }
+  });
+
+  twilioWs.on("close", () => {
+    console.log("Twilio disconnected");
+
+    if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
+      openAiWs.close();
+    }
+  });
+
+  twilioWs.on("error", (err) => {
+    console.error("Twilio WebSocket error:", err);
+  });
 });
 
-const port = process.env.PORT || 3000;
-
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });

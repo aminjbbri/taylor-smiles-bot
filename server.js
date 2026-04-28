@@ -36,7 +36,7 @@ if (!fs.existsSync(AUDIO_DIR)) {
 app.use("/audio", express.static(AUDIO_DIR));
 
 // New file name so old cedar/alloy/nova greeting is not reused
-const GREETING_FILE = path.join(AUDIO_DIR, "greeting-marin-final-v1.mp3");
+const GREETING_FILE = path.join(AUDIO_DIR, "greeting-marin-final-v2.mp3");
 
 async function makeGreetingIfNeeded() {
   if (fs.existsSync(GREETING_FILE)) return;
@@ -46,7 +46,7 @@ async function makeGreetingIfNeeded() {
   const speech = await client.audio.speech.create({
     model: "gpt-4o-mini-tts",
     voice: GREETING_VOICE,
-    input: "Hi, Taylor Smiles.",
+    input: "Thank you for calling Taylor Smiles.",
   });
 
   const buffer = Buffer.from(await speech.arrayBuffer());

@@ -3,6 +3,9 @@ require("dotenv").config();
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
+const OpenAI = require("openai");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 const server = http.createServer(app);
@@ -17,23 +20,57 @@ const BASE_URL = process.env.BASE_URL || "https://taylor-smiles-bot.onrender.com
 const REALTIME_MODEL = process.env.REALTIME_MODEL || "gpt-4o-realtime-preview";
 const REALTIME_VOICE = process.env.REALTIME_VOICE || "alloy";
 
-if (!OPENAI_API_KEY) {
-  console.error("Missing OPENAI_API_KEY environment variable.");
+const client = new OpenAI({
+  apiKey: OPENAI_API_KEY,
+});
+
+const AUDIO_DIR = path.join(__dirname, "audio");
+
+if (!fs.existsSync(AUDIO_DIR)) {
+  fs.mkdirSync(AUDIO_DIR);
+}
+
+app.use("/audio", express.static(AUDIO_DIR));
+
+const GREETING_FILE = path.join(AUDIO_DIR, "greeting.mp3");
+
+async function makeGreetingIfNeeded() {
+  if (fs.existsSync(GREETING_FILE)) return;
+
+  console.log("Creating natural greeting audio...");
+
+  const speech = await client.audio.speech.create({
+    model: "gpt-4o-mini-tts",
+    voice: "nova",
+    input: "Hi, thanks for calling Taylor Smiles. How can I help?"
+  });
+
+  const buffer = Buffer.from(await speech.arrayBuffer());
+  fs.writeFileSync(GREETING_FILE, buffer);
+
+  console.log("Greeting audio created.");
 }
 
 app.get("/", (req, res) => {
   res.send("Taylor Smiles realtime receptionist is running.");
 });
 
-app.all("/incoming-call", (req, res) => {
+app.get("/greeting.mp3", async (req, res) => {
+  try {
+    await makeGreetingIfNeeded();
+    res.sendFile(GREETING_FILE);
+  } catch (err) {
+    console.error("Greeting TTS error:", err);
+    res.status(500).send("Greeting error");
+  }
+});
+
+app.all("/incoming-call", async (req, res) => {
   const host = new URL(BASE_URL).host;
 
-  // IMPORTANT:
-  // Twilio says the first greeting immediately.
-  // Then it connects the live OpenAI Realtime stream.
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="alice">Hi, thanks for calling Taylor Smiles. How can I help?</Say>
+  <Play>${BASE_URL}/greeting.mp3</Play>
   <Connect>
     <Stream url="wss://${host}/media-stream" />
   </Connect>
@@ -87,8 +124,8 @@ wss.on("connection", (twilioWs) => {
           instructions: `
 You are a warm woman answering the phone for Taylor Smiles.
 
-Important context:
-The caller has already heard the opening greeting:
+Important:
+The caller already heard the opening greeting:
 "Hi, thanks for calling Taylor Smiles. How can I help?"
 
 So do NOT greet again.
@@ -101,32 +138,28 @@ The business is secondary. The human experience is the priority.
 Tone:
 - warm
 - calm
-- relaxed
 - natural
+- relaxed
 - human
-- casual but professional
+- conversational
 - not overly polished
 - not overly eager
-- thoughtful
 
 Very important:
+- Do NOT sound like a chatbot.
 - Do NOT respond to unclear mumbles as if you understood.
-- If the caller mumbles, makes a small sound, or says something unclear, ask naturally:
+- If the caller mumbles or says something unclear, say:
   "Sorry, what was that?"
   or
   "Sorry, I missed that."
-- Do NOT say "absolutely" unless the caller clearly asked for something.
-- Do NOT agree randomly.
+- Do NOT say "absolutely" randomly.
 - Do NOT over-answer.
 - Do NOT force a structure.
 - Do NOT repeat phrases.
 - Do NOT say "anything else I can help with" repeatedly.
-- Do NOT sound like a chatbot.
 - Keep replies short and natural.
-- Ask only one question at a time.
+- Ask one question at a time.
 - Let the conversation breathe.
-- If the caller pauses, do not rush too much.
-- If the caller sounds unsure, be patient.
 
 Business context:
 Taylor Smiles is an orthodontic clinic.
@@ -148,14 +181,8 @@ Make the caller feel like they are speaking with a relaxed, thoughtful human rec
 
           turn_detection: {
             type: "server_vad",
-
-            // Higher = less likely to react to mumbling/background noise
             threshold: 0.65,
-
-            // Keeps a bit of audio before detected speech
             prefix_padding_ms: 400,
-
-            // Higher = waits longer before replying
             silence_duration_ms: 900,
           },
         },

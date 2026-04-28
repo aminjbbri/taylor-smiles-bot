@@ -14,10 +14,7 @@ const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const BASE_URL = process.env.BASE_URL || "https://taylor-smiles-bot.onrender.com";
 
-// Safe model for Realtime preview
 const REALTIME_MODEL = process.env.REALTIME_MODEL || "gpt-4o-realtime-preview";
-
-// Safer voice for testing. Later we can test other supported voices.
 const REALTIME_VOICE = process.env.REALTIME_VOICE || "alloy";
 
 if (!OPENAI_API_KEY) {
@@ -53,6 +50,7 @@ wss.on("connection", (twilioWs) => {
   let streamSid = null;
   let openAiWs = null;
   let openAiReady = false;
+  let greetingSent = false;
 
   function safeSendToTwilio(payload) {
     if (twilioWs.readyState === WebSocket.OPEN) {
@@ -64,6 +62,23 @@ wss.on("connection", (twilioWs) => {
     if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
       openAiWs.send(JSON.stringify(payload));
     }
+  }
+
+  function sendGreetingOnce() {
+    if (!openAiReady || !streamSid || greetingSent) return;
+
+    greetingSent = true;
+
+    console.log("Sending initial greeting.");
+
+    safeSendToOpenAI({
+      type: "response.create",
+      response: {
+        modalities: ["audio"],
+        instructions:
+          "Greet the caller warmly and naturally in one short sentence. Say: Hi, thanks for calling Taylor Smiles, how can I help?"
+      },
+    });
   }
 
   function connectOpenAI() {
@@ -86,90 +101,94 @@ wss.on("connection", (twilioWs) => {
           instructions: `
 You are a warm woman answering the phone for Taylor Smiles.
 
-The experience matters more than sounding like a business script.
-
 You are a person first, receptionist second.
 
-Speak naturally, casually, and briefly.
-You are not a form.
-You are not a chatbot.
-You are not a customer-service script.
+The call should feel like talking to a real human, not a system.
 
 Tone:
 - warm
-- relaxed
-- human
 - calm
-- easy to talk to
-- lightly conversational
+- relaxed
+- natural
+- human
+- casual but professional
 - not overly polished
+- not overly eager
 
-Rules:
-- keep responses short
-- do not over-explain
-- do not ask too many questions
-- do not repeat the same phrase
-- do not say "anything else I can help with" repeatedly
-- do not force a structure
-- do not give exact treatment pricing
-- if asked about price, say it depends on the case and the team can go over that during a consultation
-- if the caller asks if you are AI, answer honestly: "I'm the phone assistant for Taylor Smiles."
+Very important:
+- Do NOT respond to unclear mumbles as if you understood.
+- If the caller mumbles, makes a small sound, or says something unclear, ask naturally:
+  "Sorry, what was that?"
+  or
+  "Sorry, I missed that."
+- Do NOT say "absolutely" unless the caller clearly asked for something.
+- Do NOT agree randomly.
+- Do NOT over-answer.
+- Do NOT force a structure.
+- Do NOT repeat phrases.
+- Do NOT say "anything else I can help with" repeatedly.
+- Keep replies short and natural.
+- Ask only one question at a time.
+- Let the conversation breathe.
 
 Business context:
 Taylor Smiles is an orthodontic clinic.
 People may ask about braces, Invisalign, retainers, appointments, adults, kids, consultations, broken retainers, broken brackets, pain, or rescheduling.
 
-Your goal is to make the phone call feel natural, easy, and human.
+Business rules:
+- Do not give exact treatment pricing.
+- If asked about price, say it depends on the case and the team can go over it during a consultation.
+- If the caller asks if you are AI, answer honestly: "I'm the phone assistant for Taylor Smiles."
+
+Your goal:
+Make the caller feel like they are speaking with a relaxed, thoughtful receptionist.
           `.trim(),
 
           voice: REALTIME_VOICE,
 
-          // Twilio phone audio format
           input_audio_format: "g711_ulaw",
           output_audio_format: "g711_ulaw",
 
           turn_detection: {
             type: "server_vad",
-            threshold: 0.45,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 550
+
+            // Higher threshold = less likely to trigger on mumbling/background noise
+            threshold: 0.65,
+
+            // Keeps a bit of audio before detected speech
+            prefix_padding_ms: 400,
+
+            // Waits longer before deciding caller is done speaking
+            silence_duration_ms: 900
           }
         }
       };
 
       safeSendToOpenAI(sessionUpdate);
 
-      // Initial greeting
-      safeSendToOpenAI({
-        type: "response.create",
-        response: {
-          modalities: ["audio"],
-          instructions:
-            "Greet the caller naturally in one very short sentence. Sound relaxed, not scripted."
-        }
-      });
+      // Do not greet yet. Wait until Twilio streamSid exists.
+      sendGreetingOnce();
     });
 
     openAiWs.on("message", (data) => {
       try {
         const event = JSON.parse(data.toString());
 
-        // OpenAI sends audio chunks back
         if (event.type === "response.audio.delta" && event.delta && streamSid) {
           safeSendToTwilio({
             event: "media",
             streamSid,
             media: {
-              payload: event.delta
-            }
+              payload: event.delta,
+            },
           });
         }
 
-        // If caller starts talking while assistant speaks, clear Twilio audio
         if (event.type === "input_audio_buffer.speech_started" && streamSid) {
+          // This allows interruption, but only after clearer speech due to higher VAD threshold.
           safeSendToTwilio({
             event: "clear",
-            streamSid
+            streamSid,
           });
         }
 
@@ -200,19 +219,23 @@ Your goal is to make the phone call feel natural, easy, and human.
       if (msg.event === "start") {
         streamSid = msg.start.streamSid;
         console.log("Twilio stream started:", streamSid);
+
+        // Now Twilio is ready, so greeting should be heard.
+        sendGreetingOnce();
       }
 
       if (msg.event === "media") {
         if (openAiReady) {
           safeSendToOpenAI({
             type: "input_audio_buffer.append",
-            audio: msg.media.payload
+            audio: msg.media.payload,
           });
         }
       }
 
       if (msg.event === "stop") {
         console.log("Twilio stream stopped.");
+
         if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
           openAiWs.close();
         }
@@ -224,6 +247,7 @@ Your goal is to make the phone call feel natural, easy, and human.
 
   twilioWs.on("close", () => {
     console.log("Twilio disconnected.");
+
     if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
       openAiWs.close();
     }

@@ -18,7 +18,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const BASE_URL = process.env.BASE_URL || "https://taylor-smiles-bot.onrender.com";
 
 const REALTIME_MODEL = process.env.REALTIME_MODEL || "gpt-4o-realtime-preview";
-const REALTIME_VOICE = process.env.REALTIME_VOICE || "alloy";
+const REALTIME_VOICE = process.env.REALTIME_VOICE || "marin";
 
 const client = new OpenAI({
   apiKey: OPENAI_API_KEY,

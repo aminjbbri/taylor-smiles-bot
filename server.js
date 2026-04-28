@@ -28,8 +28,12 @@ app.get("/", (req, res) => {
 app.all("/incoming-call", (req, res) => {
   const host = new URL(BASE_URL).host;
 
+  // IMPORTANT:
+  // Twilio says the first greeting immediately.
+  // Then it connects the live OpenAI Realtime stream.
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
+  <Say voice="alice">Hi, thanks for calling Taylor Smiles. How can I help?</Say>
   <Connect>
     <Stream url="wss://${host}/media-stream" />
   </Connect>
@@ -50,7 +54,6 @@ wss.on("connection", (twilioWs) => {
   let streamSid = null;
   let openAiWs = null;
   let openAiReady = false;
-  let greetingSent = false;
 
   function safeSendToTwilio(payload) {
     if (twilioWs.readyState === WebSocket.OPEN) {
@@ -62,42 +65,6 @@ wss.on("connection", (twilioWs) => {
     if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
       openAiWs.send(JSON.stringify(payload));
     }
-  }
-
-  function sendGreetingOnce() {
-    if (!openAiReady) {
-      console.log("Greeting delayed: OpenAI not ready yet.");
-      return;
-    }
-
-    if (!streamSid) {
-      console.log("Greeting delayed: Twilio stream not ready yet.");
-      return;
-    }
-
-    if (greetingSent) {
-      console.log("Greeting already sent.");
-      return;
-    }
-
-    greetingSent = true;
-
-    console.log("Sending initial greeting.");
-
-    safeSendToOpenAI({
-      type: "response.create",
-      response: {
-        modalities: ["audio"],
-        instructions:
-          "Greet the caller warmly and naturally in one short sentence. Say: Hi, thanks for calling Taylor Smiles, how can I help?",
-      },
-    });
-  }
-
-  function scheduleGreeting() {
-    setTimeout(() => {
-      sendGreetingOnce();
-    }, 600);
   }
 
   function connectOpenAI() {
@@ -120,9 +87,14 @@ wss.on("connection", (twilioWs) => {
           instructions: `
 You are a warm woman answering the phone for Taylor Smiles.
 
-You are a person first, receptionist second.
+Important context:
+The caller has already heard the opening greeting:
+"Hi, thanks for calling Taylor Smiles. How can I help?"
 
-The call should feel like talking to a real human, not a system.
+So do NOT greet again.
+Wait for the caller to speak, then respond naturally.
+
+You are a person first, receptionist second.
 
 The business is secondary. The human experience is the priority.
 
@@ -190,9 +162,6 @@ Make the caller feel like they are speaking with a relaxed, thoughtful human rec
       };
 
       safeSendToOpenAI(sessionUpdate);
-
-      // If Twilio is already ready, greet after a tiny delay.
-      scheduleGreeting();
     });
 
     openAiWs.on("message", (data) => {
@@ -210,7 +179,6 @@ Make the caller feel like they are speaking with a relaxed, thoughtful human rec
         }
 
         if (event.type === "input_audio_buffer.speech_started" && streamSid) {
-          // Allows caller to interrupt naturally.
           safeSendToTwilio({
             event: "clear",
             streamSid,
@@ -244,9 +212,6 @@ Make the caller feel like they are speaking with a relaxed, thoughtful human rec
       if (msg.event === "start") {
         streamSid = msg.start.streamSid;
         console.log("Twilio stream started:", streamSid);
-
-        // Twilio is now ready, so greet shortly after.
-        scheduleGreeting();
       }
 
       if (msg.event === "media") {

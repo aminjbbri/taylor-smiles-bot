@@ -1,14 +1,14 @@
 {
-  "name": "taylor-smiles-bot",
+  "name": "taylor-smiles-realtime-bot",
   "version": "1.0.0",
-  "description": "Taylor Smiles phone receptionist bot",
+  "description": "Realtime AI phone receptionist for Taylor Smiles",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.19.2",
-    "openai": "^4.56.0",
-    "twilio": "^5.2.3"
+    "ws": "^8.18.0",
+    "dotenv": "^16.4.5"
   }
 }

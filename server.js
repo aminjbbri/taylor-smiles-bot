@@ -65,7 +65,20 @@ wss.on("connection", (twilioWs) => {
   }
 
   function sendGreetingOnce() {
-    if (!openAiReady || !streamSid || greetingSent) return;
+    if (!openAiReady) {
+      console.log("Greeting delayed: OpenAI not ready yet.");
+      return;
+    }
+
+    if (!streamSid) {
+      console.log("Greeting delayed: Twilio stream not ready yet.");
+      return;
+    }
+
+    if (greetingSent) {
+      console.log("Greeting already sent.");
+      return;
+    }
 
     greetingSent = true;
 
@@ -76,9 +89,15 @@ wss.on("connection", (twilioWs) => {
       response: {
         modalities: ["audio"],
         instructions:
-          "Greet the caller warmly and naturally in one short sentence. Say: Hi, thanks for calling Taylor Smiles, how can I help?"
+          "Greet the caller warmly and naturally in one short sentence. Say: Hi, thanks for calling Taylor Smiles, how can I help?",
       },
     });
+  }
+
+  function scheduleGreeting() {
+    setTimeout(() => {
+      sendGreetingOnce();
+    }, 600);
   }
 
   function connectOpenAI() {
@@ -105,6 +124,8 @@ You are a person first, receptionist second.
 
 The call should feel like talking to a real human, not a system.
 
+The business is secondary. The human experience is the priority.
+
 Tone:
 - warm
 - calm
@@ -114,6 +135,7 @@ Tone:
 - casual but professional
 - not overly polished
 - not overly eager
+- thoughtful
 
 Very important:
 - Do NOT respond to unclear mumbles as if you understood.
@@ -127,9 +149,12 @@ Very important:
 - Do NOT force a structure.
 - Do NOT repeat phrases.
 - Do NOT say "anything else I can help with" repeatedly.
+- Do NOT sound like a chatbot.
 - Keep replies short and natural.
 - Ask only one question at a time.
 - Let the conversation breathe.
+- If the caller pauses, do not rush too much.
+- If the caller sounds unsure, be patient.
 
 Business context:
 Taylor Smiles is an orthodontic clinic.
@@ -141,7 +166,7 @@ Business rules:
 - If the caller asks if you are AI, answer honestly: "I'm the phone assistant for Taylor Smiles."
 
 Your goal:
-Make the caller feel like they are speaking with a relaxed, thoughtful receptionist.
+Make the caller feel like they are speaking with a relaxed, thoughtful human receptionist.
           `.trim(),
 
           voice: REALTIME_VOICE,
@@ -152,22 +177,22 @@ Make the caller feel like they are speaking with a relaxed, thoughtful reception
           turn_detection: {
             type: "server_vad",
 
-            // Higher threshold = less likely to trigger on mumbling/background noise
+            // Higher = less likely to react to mumbling/background noise
             threshold: 0.65,
 
             // Keeps a bit of audio before detected speech
             prefix_padding_ms: 400,
 
-            // Waits longer before deciding caller is done speaking
-            silence_duration_ms: 900
-          }
-        }
+            // Higher = waits longer before replying
+            silence_duration_ms: 900,
+          },
+        },
       };
 
       safeSendToOpenAI(sessionUpdate);
 
-      // Do not greet yet. Wait until Twilio streamSid exists.
-      sendGreetingOnce();
+      // If Twilio is already ready, greet after a tiny delay.
+      scheduleGreeting();
     });
 
     openAiWs.on("message", (data) => {
@@ -185,7 +210,7 @@ Make the caller feel like they are speaking with a relaxed, thoughtful reception
         }
 
         if (event.type === "input_audio_buffer.speech_started" && streamSid) {
-          // This allows interruption, but only after clearer speech due to higher VAD threshold.
+          // Allows caller to interrupt naturally.
           safeSendToTwilio({
             event: "clear",
             streamSid,
@@ -220,8 +245,8 @@ Make the caller feel like they are speaking with a relaxed, thoughtful reception
         streamSid = msg.start.streamSid;
         console.log("Twilio stream started:", streamSid);
 
-        // Now Twilio is ready, so greeting should be heard.
-        sendGreetingOnce();
+        // Twilio is now ready, so greet shortly after.
+        scheduleGreeting();
       }
 
       if (msg.event === "media") {

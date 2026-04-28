@@ -11,29 +11,50 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Temporary in-memory call state
-const calls = {};
+// Simple per-call memory for prototype use
+const calls = new Map();
 
 function getCall(callSid) {
-  if (!calls[callSid]) {
-    calls[callSid] = {
+  if (!calls.has(callSid)) {
+    calls.set(callSid, {
+      stage: "intro",
       intent: "",
       name: "",
-      phone: "",
+      callbackNumber: "",
       patientType: "",
       reason: "",
-      summary: ""
-    };
+      notes: ""
+    });
   }
-  return calls[callSid];
+  return calls.get(callSid);
 }
 
-function cleanupCall(callSid) {
-  delete calls[callSid];
+function clearCall(callSid) {
+  calls.delete(callSid);
 }
 
-function detectIntent(text) {
-  const t = (text || "").toLowerCase();
+function normalize(text = "") {
+  return text.toLowerCase().trim();
+}
+
+function wantsToEnd(text = "") {
+  const t = normalize(text);
+  return [
+    "no",
+    "no thanks",
+    "no thank you",
+    "that's all",
+    "that is all",
+    "nothing else",
+    "i'm good",
+    "im good",
+    "bye",
+    "goodbye"
+  ].includes(t);
+}
+
+function detectIntent(text = "") {
+  const t = normalize(text);
 
   if (
     t.includes("consult") ||
@@ -48,9 +69,9 @@ function detectIntent(text) {
   if (
     t.includes("reschedule") ||
     t.includes("cancel") ||
-    t.includes("change my appointment") ||
-    t.includes("move my appointment") ||
-    t.includes("missed my appointment")
+    t.includes("change appointment") ||
+    t.includes("move appointment") ||
+    t.includes("missed appointment")
   ) {
     return "appointment_change";
   }
@@ -62,8 +83,8 @@ function detectIntent(text) {
     t.includes("pain") ||
     t.includes("broken") ||
     t.includes("loose") ||
-    t.includes("existing patient") ||
-    t.includes("already a patient")
+    t.includes("already a patient") ||
+    t.includes("existing patient")
   ) {
     return "existing_patient_issue";
   }
@@ -71,49 +92,47 @@ function detectIntent(text) {
   return "general_question";
 }
 
-function wantsToEnd(text) {
-  const t = (text || "").toLowerCase().trim();
-  return [
-    "no",
-    "no thanks",
-    "no thank you",
-    "that's all",
-    "that is all",
-    "nothing else",
-    "bye",
-    "goodbye",
-    "i'm good",
-    "im good"
-  ].includes(t);
-}
-
-async function receptionistReply(userSpeech, callData) {
+async function receptionistReply(userSpeech, call) {
   const systemPrompt = `
-You are the front-desk receptionist for Taylor Smiles orthodontic clinic.
+You are the real front-desk receptionist for Taylor Smiles orthodontic clinic.
 
 You are speaking on the phone with a real caller.
 
 Your style:
 - warm
-- short
 - natural
-- organized
+- calm
+- slightly casual
+- short
 - human-like
-- never sound like a chatbot
+- never robotic
+- never overly formal
 
 Rules:
-- keep answers brief, like a real receptionist
-- do not give exact treatment pricing
-- if asked about cost, say pricing depends on the case and the clinic can review it during a consultation
-- if appropriate, guide the caller toward booking a consultation
-- if the caller has an urgent issue like pain, broken bracket, broken wire, or retainer problem, respond calmly and say the clinic team can help review it
-- answer in 1 to 3 short sentences max
+- sound like a real receptionist, not a chatbot
+- keep replies short: usually 1 or 2 short sentences
+- ask only one question at a time
+- do not repeat the full greeting unless the call restarts
+- do not give exact pricing
+- if asked about cost, say pricing depends on the case and the clinic can go over that during a consultation
+- if appropriate, guide the caller toward booking or next steps
+- if they mention pain, a broken bracket, broken wire, or retainer issue, sound calm and say the clinic team can help review it
+- use natural phrases like:
+  "of course"
+  "no problem"
+  "absolutely"
+  "let me get a few details"
+  "sure"
+  "okay"
 
-Known call context:
-- intent: ${callData.intent || "unknown"}
-- caller name: ${callData.name || "unknown"}
-- patient type: ${callData.patientType || "unknown"}
-- reason: ${callData.reason || "unknown"}
+Current call context:
+- intent: ${call.intent || "unknown"}
+- caller name: ${call.name || "unknown"}
+- callback number: ${call.callbackNumber || "unknown"}
+- patient type: ${call.patientType || "unknown"}
+- reason: ${call.reason || "unknown"}
+
+Answer the caller's latest message naturally, like a front-desk receptionist on the phone.
 `;
 
   const completion = await client.chat.completions.create({
@@ -126,7 +145,7 @@ Known call context:
 
   return (
     completion.choices?.[0]?.message?.content?.trim() ||
-    "Sorry, could you repeat that?"
+    "Sorry, could you say that again?"
   );
 }
 
@@ -134,20 +153,18 @@ app.get("/", (req, res) => {
   res.send("Taylor Smiles receptionist bot is running");
 });
 
-// First greeting
+// First greeting only
 app.all("/voice", (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
 
   const gather = twiml.gather({
     input: "speech",
-    action: "/detect-intent",
+    action: "/handle-intro",
     method: "POST",
     speechTimeout: "auto"
   });
 
-  gather.say(
-    "Hi, thank you for calling Taylor Smiles. How can I help you today?"
-  );
+  gather.say("Hi, thank you for calling Taylor Smiles. How can I help you today?");
 
   twiml.redirect({ method: "POST" }, "/voice");
 
@@ -155,51 +172,53 @@ app.all("/voice", (req, res) => {
   res.send(twiml.toString());
 });
 
-// Detect type of call
-app.all("/detect-intent", async (req, res) => {
+// Handle first caller message and choose path
+app.all("/handle-intro", async (req, res) => {
   const callSid = req.body.CallSid;
-  const userSpeech = req.body.SpeechResult || "";
-  const callData = getCall(callSid);
+  const speech = (req.body.SpeechResult || "").trim();
+  const call = getCall(callSid);
 
-  callData.reason = userSpeech;
-  callData.intent = detectIntent(userSpeech);
+  call.reason = speech;
+  call.intent = detectIntent(speech);
 
   const twiml = new twilio.twiml.VoiceResponse();
 
   try {
-    let firstReply = "";
-
-    if (callData.intent === "consultation") {
-      firstReply =
-        "Of course. I can help with that. Is this for you or for your child?";
-    } else if (callData.intent === "appointment_change") {
-      firstReply =
-        "No problem. I can help with that. Can I get the patient's name, please?";
-    } else if (callData.intent === "existing_patient_issue") {
-      firstReply =
-        "I'm sorry to hear that. I can help note that for the team. Can I get the patient's name, please?";
+    if (call.intent === "consultation") {
+      twiml.say("Of course. Is this for you or for your child?");
+      const gather = twiml.gather({
+        input: "speech",
+        action: "/collect-patient-type",
+        method: "POST",
+        speechTimeout: "auto"
+      });
+      gather.say("You can just say for me, or for my child.");
+    } else if (call.intent === "appointment_change") {
+      twiml.say("No problem. Can I get the patient's name, please?");
+      twiml.gather({
+        input: "speech",
+        action: "/collect-name",
+        method: "POST",
+        speechTimeout: "auto"
+      });
+    } else if (call.intent === "existing_patient_issue") {
+      twiml.say("I’m sorry to hear that. Can I get the patient's name, please?");
+      twiml.gather({
+        input: "speech",
+        action: "/collect-name",
+        method: "POST",
+        speechTimeout: "auto"
+      });
     } else {
-      firstReply = await receptionistReply(userSpeech, callData);
-    }
-
-    twiml.say(firstReply);
-
-    const nextAction =
-      callData.intent === "consultation"
-        ? "/collect-patient-type"
-        : callData.intent === "general_question"
-        ? "/general-followup"
-        : "/collect-name";
-
-    const gather = twiml.gather({
-      input: "speech",
-      action: nextAction,
-      method: "POST",
-      speechTimeout: "auto"
-    });
-
-    if (callData.intent === "general_question") {
-      gather.say("Can I get your name, please?");
+      const reply = await receptionistReply(speech, call);
+      twiml.say(reply);
+      twiml.say("Can I get your name, please?");
+      twiml.gather({
+        input: "speech",
+        action: "/collect-name",
+        method: "POST",
+        speechTimeout: "auto"
+      });
     }
 
     twiml.say("Sorry, I didn't catch that. Let's try again.");
@@ -208,7 +227,7 @@ app.all("/detect-intent", async (req, res) => {
     res.type("text/xml");
     res.send(twiml.toString());
   } catch (error) {
-    console.error("DETECT INTENT ERROR:", error);
+    console.error("HANDLE INTRO ERROR:", error);
     twiml.say("Sorry, there was a problem. Please try again later. Goodbye.");
     twiml.hangup();
     res.type("text/xml");
@@ -216,18 +235,16 @@ app.all("/detect-intent", async (req, res) => {
   }
 });
 
-// Consultation path: for you or child
 app.all("/collect-patient-type", (req, res) => {
   const callSid = req.body.CallSid;
-  const userSpeech = req.body.SpeechResult || "";
-  const callData = getCall(callSid);
+  const speech = (req.body.SpeechResult || "").trim();
+  const call = getCall(callSid);
 
-  callData.patientType = userSpeech;
+  call.patientType = speech;
 
   const twiml = new twilio.twiml.VoiceResponse();
-  twiml.say("Perfect. Can I get the patient's name, please?");
-
-  const gather = twiml.gather({
+  twiml.say("Okay, and what’s the patient's name?");
+  twiml.gather({
     input: "speech",
     action: "/collect-name",
     method: "POST",
@@ -241,18 +258,16 @@ app.all("/collect-patient-type", (req, res) => {
   res.send(twiml.toString());
 });
 
-// Collect caller/patient name
 app.all("/collect-name", (req, res) => {
   const callSid = req.body.CallSid;
-  const userSpeech = req.body.SpeechResult || "";
-  const callData = getCall(callSid);
+  const speech = (req.body.SpeechResult || "").trim();
+  const call = getCall(callSid);
 
-  callData.name = userSpeech;
+  call.name = speech;
 
   const twiml = new twilio.twiml.VoiceResponse();
-  twiml.say("Thank you. What is the best phone number for a callback?");
-
-  const gather = twiml.gather({
+  twiml.say("Thanks. What’s the best number to reach you on?");
+  twiml.gather({
     input: "speech",
     action: "/collect-phone",
     method: "POST",
@@ -266,114 +281,83 @@ app.all("/collect-name", (req, res) => {
   res.send(twiml.toString());
 });
 
-// Collect phone number
 app.all("/collect-phone", (req, res) => {
   const callSid = req.body.CallSid;
-  const userSpeech = req.body.SpeechResult || "";
-  const callData = getCall(callSid);
+  const speech = (req.body.SpeechResult || "").trim();
+  const call = getCall(callSid);
 
-  callData.phone = userSpeech;
+  call.callbackNumber = speech;
 
   const twiml = new twilio.twiml.VoiceResponse();
 
-  if (callData.intent === "consultation") {
+  if (call.intent === "consultation") {
     twiml.say(
-      `Thanks. I have ${callData.name}. The best callback number is ${callData.phone}. You are calling about a consultation.`
+      `Perfect. I’ve got ${call.name}, and the best number to reach you is ${call.callbackNumber}.`
     );
+    twiml.say("The team can follow up with you about booking a consultation.");
+  } else if (call.intent === "appointment_change") {
     twiml.say(
-      "Perfect. The clinic team can follow up about booking your consultation. Is there anything else I can help you with?"
+      `Okay. I’ve got ${call.name}, and the best number to reach you is ${call.callbackNumber}.`
     );
-  } else if (callData.intent === "appointment_change") {
+    twiml.say("I’ll note that this is about changing an appointment.");
+  } else if (call.intent === "existing_patient_issue") {
     twiml.say(
-      `Thanks. I have ${callData.name}, and the best callback number is ${callData.phone}. You are calling about changing an appointment.`
+      `Okay. I’ve got ${call.name}, and the best number to reach you is ${call.callbackNumber}.`
     );
-    twiml.say(
-      "Perfect. The clinic team can follow up to help with that. Is there anything else I can help you with?"
-    );
-  } else if (callData.intent === "existing_patient_issue") {
-    twiml.say(
-      `Thanks. I have ${callData.name}, and the best callback number is ${callData.phone}. I’ve noted the issue for the team.`
-    );
-    twiml.say(
-      "The clinic team can review that and follow up. Is there anything else I can help you with?"
-    );
+    twiml.say("I’ll note that for the team so they can review it.");
   } else {
     twiml.say(
-      `Thanks. I have ${callData.name}, and the best callback number is ${callData.phone}. Is there anything else I can help you with?`
+      `Perfect. I’ve got ${call.name}, and the best number to reach you is ${call.callbackNumber}.`
     );
+    twiml.say("I can help with anything else you need.");
   }
 
   const gather = twiml.gather({
     input: "speech",
-    action: "/process-followup",
+    action: "/followup",
     method: "POST",
     speechTimeout: "auto"
   });
 
-  twiml.say("Thank you for calling Taylor Smiles. Goodbye.");
+  gather.say("Anything else I can help with today?");
+
+  twiml.say("Thanks for calling Taylor Smiles. Goodbye.");
   twiml.hangup();
 
   res.type("text/xml");
   res.send(twiml.toString());
 });
 
-// General question path before collecting name
-app.all("/general-followup", (req, res) => {
+app.all("/followup", async (req, res) => {
   const callSid = req.body.CallSid;
-  const userSpeech = req.body.SpeechResult || "";
-  const callData = getCall(callSid);
-
-  callData.name = userSpeech;
-
-  const twiml = new twilio.twiml.VoiceResponse();
-  twiml.say("Thank you. What is the best callback number, in case the team needs to reach you?");
-
-  const gather = twiml.gather({
-    input: "speech",
-    action: "/collect-phone",
-    method: "POST",
-    speechTimeout: "auto"
-  });
-
-  twiml.say("Sorry, I didn't catch that.");
-  twiml.redirect({ method: "POST" }, "/voice");
-
-  res.type("text/xml");
-  res.send(twiml.toString());
-});
-
-// Continue the conversation naturally
-app.all("/process-followup", async (req, res) => {
-  const callSid = req.body.CallSid;
-  const userSpeech = req.body.SpeechResult || "";
-  const callData = getCall(callSid);
+  const speech = (req.body.SpeechResult || "").trim();
+  const call = getCall(callSid);
 
   const twiml = new twilio.twiml.VoiceResponse();
 
   try {
-    if (wantsToEnd(userSpeech)) {
-      twiml.say("Thank you for calling Taylor Smiles. Have a great day. Goodbye.");
+    if (wantsToEnd(speech)) {
+      twiml.say("Thanks for calling Taylor Smiles. Have a great day. Goodbye.");
       twiml.hangup();
-      cleanupCall(callSid);
+      clearCall(callSid);
       res.type("text/xml");
       res.send(twiml.toString());
       return;
     }
 
-    const reply = await receptionistReply(userSpeech, callData);
-
+    const reply = await receptionistReply(speech, call);
     twiml.say(reply);
 
     const gather = twiml.gather({
       input: "speech",
-      action: "/process-followup",
+      action: "/followup",
       method: "POST",
       speechTimeout: "auto"
     });
 
-    gather.say("Is there anything else I can help you with?");
+    gather.say("Anything else I can help with today?");
 
-    twiml.say("Thank you for calling Taylor Smiles. Goodbye.");
+    twiml.say("Thanks for calling Taylor Smiles. Goodbye.");
     twiml.hangup();
 
     res.type("text/xml");
@@ -382,7 +366,7 @@ app.all("/process-followup", async (req, res) => {
     console.error("FOLLOWUP ERROR:", error);
     twiml.say("Sorry, there was a problem. Please try again later. Goodbye.");
     twiml.hangup();
-    cleanupCall(callSid);
+    clearCall(callSid);
     res.type("text/xml");
     res.send(twiml.toString());
   }

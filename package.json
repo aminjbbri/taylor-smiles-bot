@@ -1,0 +1,14 @@
+{
+  "name": "taylor-smiles-bot",
+  "version": "1.0.0",
+  "description": "Taylor Smiles phone receptionist bot",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "openai": "^4.56.0",
+    "twilio": "^5.2.3"
+  }
+}

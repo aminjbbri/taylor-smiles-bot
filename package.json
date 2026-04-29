@@ -1,7 +1,7 @@
 {
-  "name": "taylor-smiles-realtime-bot",
+  "name": "harbourcraft-carpentry-realtime-bot",
   "version": "1.0.0",
-  "description": "Realtime AI phone receptionist for Taylor Smiles",
+  "description": "Realtime AI phone assistant for HarbourCraft Carpentry",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
